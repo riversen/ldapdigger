@@ -34,9 +34,16 @@ Comprehensive LDAP enumeration designed to extract as much data as possible from
 ## Installation
 
 ```bash
-# Dependencies
+# System deps (required to build python-ldap)
 sudo apt install -y libldap2-dev libsasl2-dev
-python3 -m pip install python-ldap
+
+# Option 1: venv (recommended)
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+
+# Option 2: system-wide (Kali / PEP 668 systems)
+pip install -r requirements.txt --break-system-packages
 
 # Make executable
 chmod +x ldapdigger.py
@@ -60,6 +67,27 @@ chmod +x ldapdigger.py
   --csv users.csv \
   --userlist uids.txt
 ```
+
+### Multiple targets
+
+Create a target file with one host per line — full URIs, `host:port`, or bare hostnames (defaults to port 389):
+
+```
+# targets.txt
+ldap://10.82.148.32:1389
+10.82.148.33:389
+10.82.148.34
+# comments and blank lines are ignored
+```
+
+```bash
+./ldapdigger.py -L targets.txt --full -o results.json --userlist uids.txt
+
+# Non-standard port for bare hostnames
+./ldapdigger.py -L targets.txt -p 1389 --full -o results.json
+```
+
+Output files are automatically tagged per host to avoid clobbering, e.g. `results_10.82.148.32_1389.json`, `results_10.82.148.33_389.json`. Failed hosts are skipped and the run continues.
 
 ### Interactive shell
 
@@ -103,7 +131,9 @@ Interactive commands:
 
 | Flag | Description |
 |------|-------------|
-| `-H`, `--uri` | LDAP URI (required), e.g. `ldap://host:port` |
+| `-H`, `--uri` | LDAP URI (e.g., `ldap://host:port`) |
+| `-L`, `--target-list` | File with LDAP targets, one per line (URI, host:port, or hostname) |
+| `-p`, `--port` | Default port for bare hostnames in target list (default: 389) |
 | `-b`, `--base-dn` | Base DN. Auto-discovered if omitted |
 | `-i`, `--interactive` | Launch interactive shell |
 | `--full` | Run full enumeration pipeline |

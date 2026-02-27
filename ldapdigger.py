@@ -1075,17 +1075,23 @@ Examples:
 
   # Export user list for password spraying
   ldapdigger.py -H ldap://10.82.148.32:1389 -b "dc=prd,dc=tch" --full --userlist users.txt
+
+  # Enumerate multiple hosts from a file
+  ldapdigger.py -L targets.txt --full -o results.json
         """
     )
 
-    parser.add_argument("-H", "--uri", required=True, help="LDAP URI (e.g., ldap://host:port)")
+    target = parser.add_mutually_exclusive_group(required=True)
+    target.add_argument("-H", "--uri", help="LDAP URI (e.g., ldap://host:port)")
+    target.add_argument("-L", "--target-list", help="File with LDAP targets, one per line (URI, host, or host:port)")
     parser.add_argument("-b", "--base-dn", default="", help="Base DN (e.g., dc=prd,dc=tch). Auto-discovered from Root DSE if omitted.")
-    parser.add_argument("-i", "--interactive", action="store_true", help="Launch interactive shell")
+    parser.add_argument("-i", "--interactive", action="store_true", help="Launch interactive shell (single target only)")
     parser.add_argument("--full", action="store_true", help="Run full enumeration pipeline")
     parser.add_argument("--oc-sweep", action="store_true", help="Run objectClass sweep only")
     parser.add_argument("--wildcard", action="store_true", help="Run wildcard uid enumeration")
     parser.add_argument("--dump-tree", action="store_true", help="Dump directory tree structure")
     parser.add_argument("--page-size", type=int, default=PAGE_SIZE, help=f"Page size (default {PAGE_SIZE})")
+    parser.add_argument("-p", "--port", type=int, default=389, help="Default port for bare hostnames in target list (default: 389)")
     parser.add_argument("-t", "--timeout", type=int, default=10, help="LDAP timeout in seconds")
     parser.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
 
@@ -1098,8 +1104,74 @@ Examples:
 
     args = parser.parse_args()
 
+    # --- Build target list ---
+    if args.target_list:
+        if args.interactive:
+            print("[-] Interactive mode (-i) is not supported with --target-list")
+            sys.exit(1)
+        targets = _parse_target_list(args.target_list, args.port)
+        if not targets:
+            print(f"[-] No valid targets found in {args.target_list}")
+            sys.exit(1)
+    else:
+        targets = [args.uri]
+
+    # --- Run against each target ---
+    total = len(targets)
+    for idx, uri in enumerate(targets, 1):
+        if total > 1:
+            print(f"\n{'#'*70}")
+            print(f"# TARGET {idx}/{total}: {uri}")
+            print(f"{'#'*70}")
+
+        # For multi-host runs, tag output files with a host label
+        host_label = _host_label(uri) if total > 1 else None
+
+        _run_target(args, uri, host_label)
+
+
+def _parse_target_list(filepath, default_port=389):
+    """Parse a target list file. Accepts URIs, host:port, or bare hosts."""
+    targets = []
+    try:
+        with open(filepath) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                # Already a full URI
+                if line.startswith("ldap://") or line.startswith("ldaps://"):
+                    targets.append(line)
+                # host:port
+                elif ":" in line:
+                    targets.append(f"ldap://{line}")
+                # bare host — use default port
+                else:
+                    targets.append(f"ldap://{line}:{default_port}")
+    except FileNotFoundError:
+        print(f"[-] Target list not found: {filepath}")
+    return targets
+
+
+def _host_label(uri):
+    """Extract a filesystem-safe label from a URI for output filenames."""
+    label = uri.replace("ldap://", "").replace("ldaps://", "")
+    label = label.replace(":", "_").replace("/", "")
+    return label
+
+
+def _tagged_path(filepath, label):
+    """Insert a host label into a filename: results.json → results_10.10.10.1_389.json"""
+    if not label or not filepath:
+        return filepath
+    base, ext = os.path.splitext(filepath)
+    return f"{base}_{label}{ext}"
+
+
+def _run_target(args, uri, host_label=None):
+    """Run enumeration against a single target."""
     enum = LDAPEnum(
-        uri=args.uri,
+        uri=uri,
         base_dn=args.base_dn,
         timeout=args.timeout,
         page_size=args.page_size,
@@ -1119,15 +1191,23 @@ Examples:
         shell.cmdloop()
     elif args.full:
         if not enum.run_full_enum():
+            if host_label:
+                print(f"[-] Failed: {uri} — skipping")
+                return
             sys.exit(1)
     else:
         if not enum.connect():
+            if host_label:
+                print(f"[-] Failed to connect: {uri} — skipping")
+                return
             sys.exit(1)
 
         if not enum.base_dn:
             enum.base_dn = enum.discover_base_dn()
             if not enum.base_dn:
                 print("[-] Could not discover base DN. Specify with -b.")
+                if host_label:
+                    return
                 sys.exit(1)
 
         enum.enum_root_dse()
@@ -1149,30 +1229,33 @@ Examples:
         if not args.oc_sweep and not args.wildcard and not args.dump_tree:
             print("\n[*] No enumeration flags specified. Use --full, --oc-sweep, --wildcard, or -i")
             print("    Run with -h for help.")
-            sys.exit(0)
+            if not host_label:
+                sys.exit(0)
+            return
 
         enum.print_summary()
 
     # --- Export ---
     if args.output:
-        ext = os.path.splitext(args.output)[1].lower()
+        out = _tagged_path(args.output, host_label)
+        ext = os.path.splitext(out)[1].lower()
         if ext == ".json":
-            enum.export_json(args.output)
+            enum.export_json(out)
         elif ext == ".ldif":
-            enum.export_ldif(args.output)
+            enum.export_ldif(out)
         elif ext == ".csv":
-            enum.export_csv_users(args.output)
+            enum.export_csv_users(out)
         else:
-            enum.export_json(args.output)
+            enum.export_json(out)
 
     if args.ldif:
-        enum.export_ldif(args.ldif)
+        enum.export_ldif(_tagged_path(args.ldif, host_label))
     if args.json:
-        enum.export_json(args.json)
+        enum.export_json(_tagged_path(args.json, host_label))
     if args.csv:
-        enum.export_csv_users(args.csv)
+        enum.export_csv_users(_tagged_path(args.csv, host_label))
     if args.userlist:
-        enum.export_userlist(args.userlist)
+        enum.export_userlist(_tagged_path(args.userlist, host_label))
 
 
 if __name__ == "__main__":
